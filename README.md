@@ -130,5 +130,6 @@ postgres/init/02_seed.sql     5 meters, 5 sensors, 4 properties, 20 datastreams
 postgres/pg_hba.conf          client auth: remote = TLS + SCRAM only
 mosquitto/mosquitto.conf      broker config (TLS on 8883, auth required)
 simulator/                    python publisher (paho-mqtt + psycopg2)
+INGEST.md                     step-by-step CIVITAS/CORE ingestion instructions
 ```
 # civitas-test-data
