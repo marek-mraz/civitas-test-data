@@ -22,9 +22,14 @@ and *Persist, transform & provide Data*, filled in with this stack's actual valu
 - **Description:** Smart meter device and energy datastream structure
 
 Create a version (e.g. `1.0`), then model these four classes in the
-Structure Definition canvas. Types below are the standard primitives — if your
-dropdown names them differently (e.g. `Number` instead of `Double`,
-`Timestamp` instead of `Date`), pick the closest match.
+Structure Definition canvas.
+
+**About types:** under the hood CIVITAS/CORE stores structure definitions as
+JSON Schema 2020-12, so the primitives are `string`, `number`, `integer`,
+`boolean` (dates/timestamps are strings with `format: date-time`), plus
+geometry types. The tables below say `Double` — pick `number` (or whatever
+your dropdown calls it); `Date`/`DateTime` — pick the date type if offered,
+otherwise `string`.
 
 **Class `Thing`** (table `smartmeter.thing`)
 
@@ -81,9 +86,11 @@ dropdown names them differently (e.g. `Number` instead of `Double`,
 | observation_type | String | 1 | constant OGC URL — set as Default Value + Static |
 | mqtt_topic | String | 1 | `taf10/sensors/<serial_number>` |
 
-Relationships (instead of, or in addition to, the FK string attributes):
-`Sensor → Thing`, `Datastream → Thing`, `Datastream → Sensor`,
-`Datastream → ObservedProperty`.
+**Relationships are mandatory:** every Class must be connected — unconnected
+Classes are not included in the hierarchical structure and won't show up in
+the Mapping Editor. Connect (Composition works for all four):
+`Thing → Sensor`, `Thing → Datastream`, `Sensor → Datastream`,
+`ObservedProperty → Datastream` — mirroring the FK columns.
 
 ### 1.2 Release the Data structure
 
