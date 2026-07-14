@@ -1,0 +1,135 @@
+# CIVITAS/CORE test data sources — Smart Meter energy use case ("TAF10")
+#
+# One self-contained stack that provides everything the CIVITAS/CORE
+# "Connect external Data" guide needs:
+#
+#   postgres   -> master data source (Things / Sensors / ObservedProperties /
+#                 Datastreams, modeled on FIWARE Smart Data Models "Device")
+#   mosquitto  -> MQTT broker for measurement data
+#   simulator  -> reads master data from postgres and continuously publishes
+#                 measurements (Smart Data Models "ACMeasurement") via MQTT
+#
+# Deployable as a single Docker Compose project in Dokploy.
+# All credentials/ports are overridable via environment (.env).
+#
+# Security: both data sources require username/password auth. There are
+# deliberately NO default passwords — the stack refuses to start unless
+# POSTGRES_PASSWORD and MQTT_PASSWORD are set (in .env or Dokploy Environment),
+# so a deployment can never go online with well-known credentials.
+#
+# TLS: cert-gen auto-generates a certificate into the certs volume on first
+# start — nothing to create or import by hand. Clients connect with
+# "encrypt, don't verify" (postgres sslmode=require / MQTT "allow self-signed"),
+# so no CA import is needed anywhere. Postgres rejects plaintext remote
+# connections; MQTT only publishes the TLS listener (8883).
+
+services:
+  cert-gen:
+    image: alpine/openssl:latest
+    restart: "no"
+    entrypoint: ["/bin/sh", "/gen-certs.sh"]
+    environment:
+      # hostname clients use — only matters if a client chooses to verify
+      PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME:-localhost}
+    volumes:
+      - ./certs/gen-certs.sh:/gen-certs.sh:ro
+      - certs:/certs
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    command: >
+      postgres
+      -c ssl=on
+      -c ssl_cert_file=/certs/server.crt
+      -c ssl_key_file=/certs/server.key
+      -c hba_file=/etc/postgresql/pg_hba.conf
+    depends_on:
+      cert-gen:
+        condition: service_completed_successfully
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-smartmeter}
+      POSTGRES_USER: ${POSTGRES_USER:-civitas}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env / Dokploy Environment}
+      # SCRAM challenge-response auth: the password itself never crosses the
+      # wire, and stored hashes are salted (applies to first initdb only)
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # Provisioning: schema + Smart Data Models seed, runs on first start only
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+      # TLS-only client auth, applied on every boot
+      - ./postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      - type: volume
+        source: certs
+        target: /certs
+        read_only: true
+        volume:
+          subpath: postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    restart: unless-stopped
+    environment:
+      MQTT_USER: ${MQTT_USER:-civitas}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:?set MQTT_PASSWORD in .env / Dokploy Environment}
+    # Generate the password file from env on every start, then run the broker
+    entrypoint: >
+      sh -c "mosquitto_passwd -c -b /mosquitto/config/passwd \"$$MQTT_USER\" \"$$MQTT_PASSWORD\"
+      && chown mosquitto:mosquitto /mosquitto/config/passwd
+      && exec mosquitto -c /mosquitto/config/mosquitto.conf"
+    depends_on:
+      cert-gen:
+        condition: service_completed_successfully
+    ports:
+      # only the TLS listener is published; plaintext 1883 stays on the
+      # internal docker network (simulator + healthcheck)
+      - "${MQTT_TLS_PORT:-8883}:8883"
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto-data:/mosquitto/data
+      - type: volume
+        source: certs
+        target: /mosquitto/certs
+        read_only: true
+        volume:
+          subpath: mosquitto
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -u \"$${MQTT_USER}\" -P \"$${MQTT_PASSWORD}\" -t '$$SYS/broker/uptime' -C 1 -W 3 >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
+
+  simulator:
+    build: ./simulator
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mosquitto:
+        condition: service_healthy
+    environment:
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      PG_DB: ${POSTGRES_DB:-smartmeter}
+      PG_USER: ${POSTGRES_USER:-civitas}
+      PG_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env / Dokploy Environment}
+      MQTT_HOST: mosquitto
+      MQTT_PORT: "1883"
+      MQTT_USER: ${MQTT_USER:-civitas}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:?set MQTT_PASSWORD in .env / Dokploy Environment}
+      MQTT_BASE_TOPIC: ${MQTT_BASE_TOPIC:-taf10/sensors}
+      PUBLISH_INTERVAL_SECONDS: ${PUBLISH_INTERVAL_SECONDS:-15}
+
+volumes:
+  postgres-data:
+  mosquitto-data:
+  certs:
