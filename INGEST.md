@@ -120,28 +120,42 @@ Access Management: add your Group + Role. Then a Data Owner / Data Gatekeeper se
 the **Version** status → **Available**, then the **Data structure** status →
 **Available**. Nothing below works until both are Available.
 
-### 1.3 Create the Data source
+### 1.3 Create the Data sources (one per table)
 
-*Data sources → Create Data source*
+The PostgreSQL connector reads **one table per Data source**, so create four
+Data sources, e.g. `Smart Meter master data — thing` (and `— sensor`,
+`— observed_property`, `— datastream`).
 
-- **Name:** `Smart Meter PostgreSQL master data`
-- **Connector type:** PostgreSQL
+*Data sources → Create Data source → Connector tab → Connector type:
+PostgreSQL.* The connector form takes a driver-specific DSN plus separate
+credentials:
 
 | Field | Value |
 |---|---|
-| Host | your deployment host |
-| Port | `5432` |
-| Database | `smartmeter` |
-| Schema | `smartmeter` |
+| Driver | `postgres` |
+| DSN | `postgres://<your-host>:5432/smartmeter?sslmode=require` |
 | User | `civitas` |
 | Password | your `POSTGRES_PASSWORD` |
-| SSL/TLS | enabled, `sslmode=require` — no certificate to import |
+| Table | see below — **include the `smartmeter.` schema prefix** |
+| Columns | see below |
+| WHERE | leave empty |
 
-Tables: `thing`, `sensor`, `observed_property`, `datastream`.
+`sslmode=require` is mandatory — the server rejects unencrypted connections.
+If the URI form is not accepted, use the key-value form:
+`host=<your-host> port=5432 dbname=smartmeter sslmode=require`
 
-In the **Data structure** tab: *Import → from Platform* → select
-`Smart Meter Energy master data`. In **Datapools**: keep "Approve for all
-Datapools" (or restrict). Release to **Available**.
+Table and columns per Data source:
+
+| Table | Columns (comma-separated) |
+|---|---|
+| `smartmeter.thing` | `id,name,description,category,controlled_property,serial_number,manufacturer_name,model_name,firmware_version,date_installed,street_address,address_locality,postal_code,latitude,longitude` |
+| `smartmeter.sensor` | `id,thing_id,name,description,encoding_type,metadata` |
+| `smartmeter.observed_property` | `id,name,definition,description` |
+| `smartmeter.datastream` | `id,thing_id,sensor_id,observed_property_id,name,description,unit_of_measurement,unit_symbol,observation_type,mqtt_topic` |
+
+For each Data source, in the **Data structure** tab: *Import → from Platform*
+→ select `Smart Meter Energy master data`. In **Datapools**: keep "Approve
+for all Datapools" (or restrict). Release each to **Available**.
 
 ---
 
@@ -201,7 +215,9 @@ Flow start → Scheduled Trigger → Data source → Mapping → Sensor Data Sto
 ```
 
 - **Scheduled Trigger:** e.g. every 30 s: `*/30 * * * * *`
-- **Data source node:** the PostgreSQL Data source
+- **Data source node(s):** the PostgreSQL Data sources — start with
+  `thing` (everything else references it), then sensor / observed_property /
+  datastream
 - **Mapping node:** input = master-data structure, output = SensorThings entities
   (Things / Sensors / ObservedProperties / Datastreams). The attribute names were
   chosen to map 1:1 in the mapping canvas.
