@@ -88,9 +88,31 @@ otherwise `string`.
 
 **Relationships are mandatory:** every Class must be connected — unconnected
 Classes are not included in the hierarchical structure and won't show up in
-the Mapping Editor. Connect (Composition works for all four):
-`Thing → Sensor`, `Thing → Datastream`, `Sensor → Datastream`,
-`ObservedProperty → Datastream` — mirroring the FK columns.
+the Mapping Editor. The editor offers two relationship types (Composition,
+Inheritance); there are no stereotypes and no explicit root-class marker —
+the root is simply the Class that is never a *part* of any Composition.
+
+Build one Composition chain with `Thing` as the root (drag **Composition**
+from the whole to the part; the filled diamond sits at the owning end):
+
+```
+Thing ◆── Sensor ◆── Datastream ◆── ObservedProperty
+      1..1        1..*            1..1
+```
+
+- `Thing` ◆── `Sensor` — multiplicity 1 : 1 (this dataset has exactly one
+  sensor per meter)
+- `Sensor` ◆── `Datastream` — multiplicity 1 : 0..* (4 datastreams each)
+- `Datastream` ◆── `ObservedProperty` — multiplicity 1 : 1 (each datastream
+  measures one property; the same property appears under several datastreams,
+  which is fine for the mapping tree)
+
+Keep the `*_id` attributes anyway — they carry the actual foreign-key values
+from PostgreSQL that the mapping uses to join rows.
+
+Optional: model `controlled_property` as an **Enumeration**
+(`energy`, `power`, `voltage`, `current`) with cardinality `1..*` instead of
+a plain String — same for `unit_symbol` (`kWh`, `kW`, `V`, `A`).
 
 ### 1.2 Release the Data structure
 
