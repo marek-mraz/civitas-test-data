@@ -21,7 +21,8 @@
 # start — nothing to create or import by hand. Clients connect with
 # "encrypt, don't verify" (postgres sslmode=require / MQTT "allow self-signed"),
 # so no CA import is needed anywhere. Postgres rejects plaintext remote
-# connections; MQTT only publishes the TLS listener (8883).
+# connections; MQTT publishes the TLS listener (8883) plus a password-protected
+# plaintext listener (1883) for the NiFi adapter — firewall 1883 to the cluster.
 
 services:
   cert-gen:
@@ -89,9 +90,10 @@ services:
       cert-gen:
         condition: service_completed_successfully
     ports:
-      # only the TLS listener is published; plaintext 1883 stays on the
-      # internal docker network (simulator + healthcheck)
+      # TLS listener (public) + plaintext listener for the NiFi adapter, which
+      # can't do TLS MQTT. Firewall 1883 to the AKS egress IP (4.184.207.76).
       - "${MQTT_TLS_PORT:-8883}:8883"
+      - "${MQTT_PORT:-1883}:1883"
     volumes:
       - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
       - mosquitto-data:/mosquitto/data
