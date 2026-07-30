@@ -27,6 +27,9 @@
 services:
   cert-gen:
     image: alpine/openssl:latest
+    # Always re-pull: these are floating tags, so a redeploy should pick up
+    # upstream patches instead of reusing whatever is cached on the host.
+    pull_policy: always
     restart: "no"
     entrypoint: ["/bin/sh", "/gen-certs.sh"]
     environment:
@@ -38,6 +41,7 @@ services:
 
   postgres:
     image: postgres:16-alpine
+    pull_policy: always
     restart: unless-stopped
     command: >
       postgres
@@ -59,7 +63,9 @@ services:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      # Provisioning: schema + Smart Data Models seed, runs on first start only
+      # Schema + Smart Data Models seed. Runs on the first start of an empty
+      # volume only; anything that must reach an existing deployment belongs in
+      # ./postgres/seed instead (applied every deploy by the `seed` service).
       - ./postgres/init:/docker-entrypoint-initdb.d:ro
       # TLS-only client auth, applied on every boot
       - ./postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
@@ -77,6 +83,7 @@ services:
 
   mosquitto:
     image: eclipse-mosquitto:2
+    pull_policy: always
     restart: unless-stopped
     environment:
       MQTT_USER: ${MQTT_USER:-civitas}
@@ -110,14 +117,44 @@ services:
       retries: 6
       start_period: 5s
 
+  # Applies ./postgres/seed/*.sql on every deploy, so master data added after
+  # the first deployment (new devices, new datastreams) actually lands in an
+  # existing database — /docker-entrypoint-initdb.d would silently skip it.
+  # The SQL there is idempotent, so re-running is a no-op.
+  seed:
+    image: postgres:16-alpine
+    pull_policy: always
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER:-civitas}
+      PGDATABASE: ${POSTGRES_DB:-smartmeter}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env / Dokploy Environment}
+      PGSSLMODE: require
+    volumes:
+      - ./postgres/seed:/seed:ro
+    entrypoint: >
+      sh -c "for f in /seed/*.sql; do echo \"applying $$f\";
+      psql -v ON_ERROR_STOP=1 -f \"$$f\" || exit 1; done; echo 'seed complete'"
+
   simulator:
-    build: ./simulator
+    build:
+      context: ./simulator
+      # Refresh the base image on every build rather than reusing a stale one
+      pull: true
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
       mosquitto:
         condition: service_healthy
+      # Master data must exist before the simulator reads it — it loads the
+      # device list once at startup and never re-queries.
+      seed:
+        condition: service_completed_successfully
     environment:
       PG_HOST: postgres
       PG_PORT: "5432"
@@ -129,6 +166,7 @@ services:
       MQTT_USER: ${MQTT_USER:-civitas}
       MQTT_PASSWORD: ${MQTT_PASSWORD:?set MQTT_PASSWORD in .env / Dokploy Environment}
       MQTT_BASE_TOPIC: ${MQTT_BASE_TOPIC:-taf10/sensors}
+      MQTT_TEMPERATURE_TOPIC: ${MQTT_TEMPERATURE_TOPIC:-loxone/sensors}
       PUBLISH_INTERVAL_SECONDS: ${PUBLISH_INTERVAL_SECONDS:-15}
 
 volumes:

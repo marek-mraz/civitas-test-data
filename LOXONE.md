@@ -138,8 +138,9 @@ works over WFS 2.0.0 with default settings.
 
 ## 5. Adding more sensors later
 
-1. Insert a row per sensor in `postgres/init/03_temperature_seed.sql`
-   (unique `id` and `serial_number`, its own coordinates).
+1. Insert a row per sensor in `postgres/seed/03_temperature_seed.sql`
+   (unique `id` and `serial_number`, its own coordinates) and redeploy — the
+   `seed` service applies that directory on every deploy.
 2. Publish that sensor to `loxone/sensors/<its serial>`.
 
 The pipeline subscribes to `loxone/sensors/#`, so new serials are picked up

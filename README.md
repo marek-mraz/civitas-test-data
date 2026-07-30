@@ -60,26 +60,25 @@ the compose deployment. Postgres provisioning (`postgres/init/*.sql`) runs only 
 first start of an empty volume; to re-provision from scratch, delete the
 `postgres-data` volume and redeploy.
 
-### Redeploying an existing stack (adding the temperature sensor)
+### Two provisioning directories
 
-**`postgres/init/*.sql` does not re-run on an existing deployment.** A redeploy
-picks up the new simulator code, but `03_temperature_seed.sql` is skipped
-because the `postgres-data` volume is no longer empty, and the simulator then
-finds no temperature device and publishes nothing on `loxone/sensors/`.
+|  | When it runs | Use it for |
+|---|---|---|
+| `postgres/init/` | **First start of an empty volume only** (Docker's `docker-entrypoint-initdb.d`) | schema, one-time bootstrap |
+| `postgres/seed/` | **Every deploy**, applied by the `seed` service | master data that must also reach an already-running deployment |
 
-Pick one:
+This split exists because Docker silently skips `init/` once the data
+directory is non-empty. Adding a device there would never show up on a live
+stack: the redeploy would ship the new simulator code, the simulator would find
+no such device, and the topic would stay empty with no error anywhere.
 
-```bash
-# A. Apply the new seed to the running database (keeps all existing data)
-docker compose cp postgres/init/03_temperature_seed.sql postgres:/tmp/temp.sql
-docker compose exec postgres psql -U civitas -d smartmeter -f /tmp/temp.sql
-docker compose restart simulator     # the simulator reads master data only at startup
+Anything in `postgres/seed/` must be **idempotent** (`ON CONFLICT DO NOTHING`) —
+it is re-applied on every single deploy. The `simulator` waits for the `seed`
+service to finish, because it reads the device list once at startup and never
+re-queries.
 
-# B. Start over (destroys the meters' master data too)
-docker compose down -v && docker compose up -d --build
-```
-
-Verify afterwards:
+So adding a sensor is just: add an idempotent `INSERT` to `postgres/seed/`,
+redeploy. Verify afterwards:
 
 ```bash
 docker compose exec postgres psql -U civitas -d smartmeter \
