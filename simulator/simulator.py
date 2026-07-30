@@ -1,8 +1,10 @@
-"""Smart meter measurement simulator for CIVITAS/CORE testing.
+"""Measurement simulator for CIVITAS/CORE testing.
 
-Reads meter master data from PostgreSQL and continuously publishes
-measurement messages over MQTT. Payloads follow the FIWARE Smart Data
-Models "ACMeasurement" entity (dataModel.Energy):
+Reads device master data from PostgreSQL and continuously publishes
+measurement messages over MQTT. Two device categories are simulated,
+each with its own Smart Data Models payload and topic tree.
+
+Smart meters (category `meter`) — "ACMeasurement" (dataModel.Energy):
 
     topic:  <MQTT_BASE_TOPIC>/<meter serial number>       (retained: no)
     payload:
@@ -17,9 +19,23 @@ Models "ACMeasurement" entity (dataModel.Energy):
       "current": 7.98                         # A
     }
 
+Loxone temperature sensors (category `temperatureSensor`) — a single
+observed property, matching what a Loxone Miniserver publishes:
+
+    topic:  <MQTT_TEMPERATURE_TOPIC>/<sensor serial number>
+    payload:
+    {
+      "id": "urn:ngsi-ld:TemperatureMeasurement:LOX-2026-000201",
+      "type": "TemperatureMeasurement",
+      "refDevice": "urn:ngsi-ld:Device:TemperatureSensor:001",
+      "dateObserved": "2026-07-30T09:30:00Z",
+      "temperature": 21.4                     # degrees Celsius
+    }
+
 Values follow a simple daily load profile (morning/evening peaks for
-residential meters, business hours for commercial/municipal) plus noise,
-so time-series charts built on top of the data look plausible.
+residential meters, business hours for commercial/municipal; a diurnal
+curve for temperature) plus noise, so time-series charts built on top of
+the data look plausible.
 """
 
 import json
@@ -50,11 +66,12 @@ MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
 MQTT_USER = os.environ.get("MQTT_USER", "civitas")
 MQTT_PASSWORD = os.environ["MQTT_PASSWORD"]
 BASE_TOPIC = os.environ.get("MQTT_BASE_TOPIC", "taf10/sensors").rstrip("/")
+TEMPERATURE_TOPIC = os.environ.get("MQTT_TEMPERATURE_TOPIC", "loxone/sensors").rstrip("/")
 INTERVAL = float(os.environ.get("PUBLISH_INTERVAL_SECONDS", "15"))
 
 
-def load_meters():
-    """Fetch meter master data, retrying until postgres is ready."""
+def load_devices():
+    """Fetch device master data, retrying until postgres is ready."""
     for attempt in range(60):
         try:
             with psycopg2.connect(**PG) as conn, conn.cursor() as cur:
@@ -65,7 +82,7 @@ def load_meters():
                 rows = cur.fetchall()
             if rows:
                 return rows
-            log.warning("no meters found yet, retrying...")
+            log.warning("no devices found yet, retrying...")
         except psycopg2.OperationalError as exc:
             log.warning("postgres not ready (%s), retrying...", exc)
         time.sleep(2)
@@ -76,6 +93,7 @@ class Meter:
     def __init__(self, device_id, serial, description):
         self.device_id = device_id
         self.serial = serial
+        self.topic_root = BASE_TOPIC
         # Commercial/municipal sites draw more and peak during the day
         self.residential = "residential" in (description or "").lower()
         self.base_kw = random.uniform(0.15, 0.4) if self.residential else random.uniform(0.8, 1.5)
@@ -110,10 +128,49 @@ class Meter:
         }
 
 
+class TemperatureSensor:
+    """Loxone temperature probe: diurnal curve plus noise, slow drift."""
+
+    def __init__(self, device_id, serial, description):
+        self.device_id = device_id
+        self.serial = serial
+        self.topic_root = TEMPERATURE_TOPIC
+        # Indoor probes sit in a narrow band; outdoor ones swing with the day.
+        self.outdoor = "outdoor" in (description or "").lower()
+        self.mean_c = random.uniform(8.0, 16.0) if self.outdoor else random.uniform(20.0, 23.0)
+        self.swing_c = random.uniform(5.0, 9.0) if self.outdoor else random.uniform(0.5, 1.5)
+        self.value_c = self.mean_c
+
+    def measure(self, now, _dt_hours):
+        # Warmest around 15:00, coldest around 03:00.
+        hour = now.hour + now.minute / 60.0
+        target = self.mean_c + self.swing_c * math.sin((hour - 9.0) * math.pi / 12.0)
+        # Ease toward the target so consecutive readings stay realistic.
+        self.value_c += (target - self.value_c) * 0.25 + random.gauss(0.0, 0.08)
+        return {
+            "id": f"urn:ngsi-ld:TemperatureMeasurement:{self.serial}",
+            "type": "TemperatureMeasurement",
+            "refDevice": self.device_id,
+            "dateObserved": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "temperature": round(self.value_c, 2),
+        }
+
+
+def build_device(device_id, serial, category, description):
+    if category == "temperatureSensor":
+        return TemperatureSensor(device_id, serial, description)
+    return Meter(device_id, serial, description)
+
+
 def main():
-    rows = load_meters()
-    meters = [Meter(device_id, serial, desc) for device_id, serial, _cat, desc in rows]
-    log.info("loaded %d meters from master data", len(meters))
+    rows = load_devices()
+    devices = [build_device(*row) for row in rows]
+    log.info(
+        "loaded %d devices from master data (%d meters, %d temperature sensors)",
+        len(devices),
+        sum(1 for d in devices if isinstance(d, Meter)),
+        sum(1 for d in devices if isinstance(d, TemperatureSensor)),
+    )
 
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="smartmeter-simulator")
     client.username_pw_set(MQTT_USER, MQTT_PASSWORD)
@@ -130,14 +187,19 @@ def main():
     signal.signal(signal.SIGINT, stop)
 
     dt_hours = INTERVAL / 3600.0
-    log.info("publishing to %s/<serial> every %.0fs", BASE_TOPIC, INTERVAL)
+    log.info(
+        "publishing to %s/<serial> and %s/<serial> every %.0fs",
+        BASE_TOPIC,
+        TEMPERATURE_TOPIC,
+        INTERVAL,
+    )
     while running:
         now = datetime.now(timezone.utc)
-        for meter in meters:
-            payload = meter.measure(now, dt_hours)
-            topic = f"{BASE_TOPIC}/{meter.serial}"
+        for device in devices:
+            payload = device.measure(now, dt_hours)
+            topic = f"{device.topic_root}/{device.serial}"
             client.publish(topic, json.dumps(payload), qos=1)
-        log.info("published %d measurements at %s", len(meters), now.isoformat())
+        log.info("published %d measurements at %s", len(devices), now.isoformat())
         time.sleep(INTERVAL)
 
     client.loop_stop()

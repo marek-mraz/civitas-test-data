@@ -1,4 +1,4 @@
-# CIVITAS/CORE test data sources — Smart Meter energy use case
+# CIVITAS/CORE test data sources — Smart Meter energy + Loxone temperature
 
 One Docker Compose project that provides the two external data sources used by the
 CIVITAS/CORE ["Connect external Data"](https://docs.core.civitasconnect.digital) how-to
@@ -8,11 +8,22 @@ guide (the "TAF10" Smart Meter energy example):
 |---|---|---|
 | `postgres` | **Master data** Data source (PostgreSQL connector) | Things, Sensors, ObservedProperties, Datastreams — pre-provisioned on first start |
 | `mosquitto` | **Measurement data** Data source (MQTT connector) | Broker with username/password auth |
-| `simulator` | (test harness) | Publishes realistic smart-meter measurements to MQTT every 15 s, derived from the master data in postgres |
+| `simulator` | (test harness) | Publishes realistic measurements to MQTT every 15 s, derived from the master data in postgres |
+
+Two use cases share the stack:
+
+| Use case | Devices | MQTT topic | Payload |
+|---|---|---|---|
+| Smart meter energy | 5 meters (`meter`) | `taf10/sensors/<serial>` | `ACMeasurement` |
+| Loxone temperature | 1 sensor (`temperatureSensor`), ZŠ SNP 20 | `loxone/sensors/<serial>` | `TemperatureMeasurement` |
+
+Wiring a real Loxone Miniserver into the temperature pipeline: see
+[LOXONE.md](LOXONE.md).
 
 Data modeling follows the [FIWARE Smart Data Models](https://smartdatamodels.org):
-master data uses `dataModel.Device` attribute names, measurements are
-`dataModel.Energy/ACMeasurement` entities.
+master data uses `dataModel.Device` attribute names, energy measurements are
+`dataModel.Energy/ACMeasurement` entities, temperature uses
+`dataModel.Environment/temperature`.
 
 ## Quick start
 
@@ -48,6 +59,39 @@ The `simulator` builds from `./simulator` — Dokploy builds it automatically as
 the compose deployment. Postgres provisioning (`postgres/init/*.sql`) runs only on the
 first start of an empty volume; to re-provision from scratch, delete the
 `postgres-data` volume and redeploy.
+
+### Redeploying an existing stack (adding the temperature sensor)
+
+**`postgres/init/*.sql` does not re-run on an existing deployment.** A redeploy
+picks up the new simulator code, but `03_temperature_seed.sql` is skipped
+because the `postgres-data` volume is no longer empty, and the simulator then
+finds no temperature device and publishes nothing on `loxone/sensors/`.
+
+Pick one:
+
+```bash
+# A. Apply the new seed to the running database (keeps all existing data)
+docker compose cp postgres/init/03_temperature_seed.sql postgres:/tmp/temp.sql
+docker compose exec postgres psql -U civitas -d smartmeter -f /tmp/temp.sql
+docker compose restart simulator     # the simulator reads master data only at startup
+
+# B. Start over (destroys the meters' master data too)
+docker compose down -v && docker compose up -d --build
+```
+
+Verify afterwards:
+
+```bash
+docker compose exec postgres psql -U civitas -d smartmeter \
+  -c "SELECT id, serial_number, category FROM smartmeter.thing WHERE category='temperatureSensor';"
+docker compose exec mosquitto \
+  mosquitto_sub -u civitas -P "$MQTT_PASSWORD" -t 'loxone/sensors/#' -C 1 -v
+```
+
+Once a real Loxone Miniserver publishes to `loxone/sensors/<serial>`, stop
+simulating that sensor: delete its row from `smartmeter.thing` (or leave it —
+the Miniserver and the simulator would both publish to the same topic and the
+readings would interleave).
 
 ## Security
 
