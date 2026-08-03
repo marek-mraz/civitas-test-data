@@ -68,6 +68,9 @@ MQTT_PASSWORD = os.environ["MQTT_PASSWORD"]
 BASE_TOPIC = os.environ.get("MQTT_BASE_TOPIC", "taf10/sensors").rstrip("/")
 TEMPERATURE_TOPIC = os.environ.get("MQTT_TEMPERATURE_TOPIC", "loxone/sensors").rstrip("/")
 INTERVAL = float(os.environ.get("PUBLISH_INTERVAL_SECONDS", "15"))
+# Set to false once a real Loxone Miniserver publishes to MQTT_TEMPERATURE_TOPIC,
+# so simulated readings don't mix with real ones.
+SIMULATE_TEMPERATURE = os.environ.get("SIMULATE_TEMPERATURE", "true").lower() in ("1", "true", "yes")
 
 
 def load_devices():
@@ -164,6 +167,9 @@ def build_device(device_id, serial, category, description):
 
 def main():
     rows = load_devices()
+    if not SIMULATE_TEMPERATURE:
+        rows = [r for r in rows if r[2] != "temperatureSensor"]
+        log.info("SIMULATE_TEMPERATURE=false — temperature sensors excluded")
     devices = [build_device(*row) for row in rows]
     log.info(
         "loaded %d devices from master data (%d meters, %d temperature sensors)",
