@@ -127,10 +127,16 @@ def main():
         client.publish(msg.topic, json.dumps(payload), qos=1)
         log.info("enriched %s -> %s", msg.topic, payload)
 
+    # Subscribe in on_connect, not once after connect(): paho does NOT restore
+    # subscriptions on auto-reconnect, so a broker restart would otherwise
+    # leave the bridge connected but deaf (bit us on 2026-08-03).
+    def on_connect(client_, _userdata, _flags, reason_code, _properties):
+        client_.subscribe(f"{topic_root}/#", qos=1)
+        log.info("connected (%s), bridging %s/#", reason_code, topic_root)
+
+    client.on_connect = on_connect
     client.on_message = on_message
     client.connect(os.environ.get("MQTT_HOST", "mosquitto"), int(os.environ.get("MQTT_PORT", "1883")), keepalive=30)
-    client.subscribe(f"{topic_root}/#", qos=1)
-    log.info("bridging %s/# on %s", topic_root, os.environ.get("MQTT_HOST", "mosquitto"))
     client.loop_forever(retry_first_connection=True)
 
 
