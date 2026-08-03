@@ -207,6 +207,34 @@ services:
       SIMULATE_TEMPERATURE: ${SIMULATE_TEMPERATURE:-true}
       PUBLISH_INTERVAL_SECONDS: ${PUBLISH_INTERVAL_SECONDS:-15}
 
+  # Enriches raw Loxone payloads (bare "27.300" or {"temperature": 27.4}) into
+  # the full CIVITAS shape on the same topic — the platform's NiFi mapping
+  # only ingests messages with refDevice + dateObserved + temperature, and a
+  # Miniserver cannot generate the ISO timestamp itself. See LOXONE.md §4.
+  bridge:
+    build:
+      context: ./bridge
+      pull: true
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mosquitto:
+        condition: service_healthy
+      seed:
+        condition: service_completed_successfully
+    environment:
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      PG_DB: ${POSTGRES_DB:-smartmeter}
+      PG_USER: ${POSTGRES_USER:-civitas}
+      PG_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env / Dokploy Environment}
+      MQTT_HOST: mosquitto
+      MQTT_PORT: "1883"
+      MQTT_USER: ${MQTT_USER:-civitas}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:?set MQTT_PASSWORD in .env / Dokploy Environment}
+      MQTT_TEMPERATURE_TOPIC: ${MQTT_TEMPERATURE_TOPIC:-loxone/sensors}
+
 volumes:
   postgres-data:
   mosquitto-data:

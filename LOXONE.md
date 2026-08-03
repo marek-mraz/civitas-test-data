@@ -190,7 +190,14 @@ tree: **Subscription (TI)** (incoming, ignore for this use case) and
       Red text in the dialog means a syntax error; black is OK.
    3. Connect the Status block's text output to the Publish input.
 
-   No timestamp or id is needed in the payload, the pipeline adds those.
+   > **Update 2026-08-03: this Status-block template is now OPTIONAL.** MQTT
+   > probes against the live pipeline showed the NiFi mapping ingests only
+   > messages carrying `refDevice` + `dateObserved` + `temperature`
+   > (`id`/`type` are optional) and silently drops everything else — and the
+   > Status block cannot generate the ISO timestamp. The `bridge` service in
+   > this repo (section 4) now enriches both the bare value and the short
+   > `{"temperature": X}` payload into the full shape, so a directly wired
+   > temperature with no Status block works too.
 4. Publishing is **on value change**, not periodic — a stable room emits a
    couple of messages per hour and that is normal (the 15 s heartbeat you
    may remember from testing was the simulator). Set **Minimum Time
@@ -233,17 +240,21 @@ nothing more to do — the pipeline already ingests it.
 **B. Loxone sends its native format** — typically the bare value (`21.4`) or a
 small Loxone-specific JSON object. This is the normal case. Pick one fix:
 
-- **Adjust the platform to match Loxone** (preferred, no extra moving parts).
-  Edit the `Loxone Temperature measurement data` structure in the portal so its
-  attributes match the keys Loxone actually publishes, then update the mapping
-  nodes in both pipelines to read those keys. Nothing else changes.
-- **Reshape in a bridge.** Run Node-RED (or the `simulator` in this repo) next
-  to the Miniserver, subscribe to Loxone's raw topic, and republish the CIVITAS
-  JSON to `loxone/sensors/<serial>`. Use this when the Miniserver cannot format
-  a payload at all.
-
-Send the output of the `mosquitto_sub` command above when you get to this
-point and the structure/mapping can be adapted to it in a few minutes.
+- **Adjust the platform to match Loxone.** Edit the `Loxone Temperature
+  measurement data` structure in the portal so its attributes match the keys
+  Loxone actually publishes, then update the mapping nodes in both pipelines
+  to read those keys. Not chosen here: the mapping hard-requires
+  `dateObserved`, and re-provisioning live pipelines re-triggers the known
+  NiFi bugs (client-ID collision, FrostPublish credentials, update saga).
+- **Reshape in a bridge — implemented (2026-08-03) as the `bridge` compose
+  service in this repo.** It subscribes to `loxone/sensors/#` next to the
+  broker, enriches any incomplete payload (bare `27.300` or
+  `{"temperature": 27.4}`) with `refDevice` (from the `thing` master data by
+  topic serial) and `dateObserved` (receive time), and republishes the full
+  CIVITAS shape on the same topic. Complete messages pass through untouched,
+  which also breaks the republish loop. Verified end-to-end 2026-08-03: bare
+  `26.500` on the wire → enriched → SensorThings observation + WFS
+  `temperature_latest` within ~1 minute.
 
 ## 5. Confirm it reached the platform
 
