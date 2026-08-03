@@ -17,10 +17,12 @@
 # POSTGRES_PASSWORD and MQTT_PASSWORD are set (in .env or Dokploy Environment),
 # so a deployment can never go online with well-known credentials.
 #
-# TLS: cert-gen auto-generates a certificate into the certs volume on first
-# start — nothing to create or import by hand. Clients connect with
-# "encrypt, don't verify" (postgres sslmode=require / MQTT "allow self-signed"),
-# so no CA import is needed anywhere. Postgres rejects plaintext remote
+# TLS: cert-gen auto-generates a self-signed certificate into the certs volume
+# on first start. Postgres clients connect with "encrypt, don't verify"
+# (sslmode=require). For MQTT the certbot service replaces the self-signed cert
+# with a real Let's Encrypt one (Route 53 DNS-01) as soon as PUBLIC_HOSTNAME +
+# AWS credentials are set — required because Loxone Miniservers refuse
+# self-signed brokers with no override. Postgres rejects plaintext remote
 # connections; MQTT publishes the TLS listener (8883) plus a password-protected
 # plaintext listener (1883) for the NiFi adapter — firewall 1883 to the cluster.
 
@@ -37,6 +39,28 @@ services:
       PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME:-localhost}
     volumes:
       - ./certs/gen-certs.sh:/gen-certs.sh:ro
+      - certs:/certs
+
+  # Let's Encrypt cert for the public MQTT listener via Route 53 DNS-01.
+  # Needs AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY (scoped to the marek-mraz.com
+  # hosted zone) in the environment; without them it idles and mosquitto keeps
+  # the cert-gen self-signed cert.
+  certbot:
+    image: certbot/dns-route53:latest
+    pull_policy: always
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/renew-loop.sh"]
+    environment:
+      DOMAIN: ${PUBLIC_HOSTNAME:-localhost}
+      LETSENCRYPT_EMAIL: ${LETSENCRYPT_EMAIL:-mrazbb@gmail.com}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+    depends_on:
+      cert-gen:
+        condition: service_completed_successfully
+    volumes:
+      - ./certs/renew-loop.sh:/renew-loop.sh:ro
+      - letsencrypt:/etc/letsencrypt
       - certs:/certs
 
   postgres:
@@ -88,11 +112,23 @@ services:
     environment:
       MQTT_USER: ${MQTT_USER:-civitas}
       MQTT_PASSWORD: ${MQTT_PASSWORD:?set MQTT_PASSWORD in .env / Dokploy Environment}
-    # Generate the password file from env on every start, then run the broker
-    entrypoint: >
-      sh -c "mosquitto_passwd -c -b /mosquitto/config/passwd \"$$MQTT_USER\" \"$$MQTT_PASSWORD\"
-      && chown mosquitto:mosquitto /mosquitto/config/passwd
-      && exec mosquitto -c /mosquitto/config/mosquitto.conf"
+    # Generate the password file from env on every start, then run the broker.
+    # The background loop SIGHUPs mosquitto when certbot publishes a renewed
+    # certificate (mosquitto 2.x reloads TLS certs on SIGHUP).
+    entrypoint:
+      - sh
+      - -c
+      - |
+        mosquitto_passwd -c -b /mosquitto/config/passwd "$$MQTT_USER" "$$MQTT_PASSWORD"
+        chown mosquitto:mosquitto /mosquitto/config/passwd
+        touch /tmp/certs-loaded
+        while sleep 3600; do
+          if [ /mosquitto/certs/server.crt -nt /tmp/certs-loaded ]; then
+            touch /tmp/certs-loaded
+            kill -HUP 1
+          fi
+        done &
+        exec mosquitto -c /mosquitto/config/mosquitto.conf
     depends_on:
       cert-gen:
         condition: service_completed_successfully
@@ -173,3 +209,4 @@ volumes:
   postgres-data:
   mosquitto-data:
   certs:
+  letsencrypt:

@@ -118,6 +118,64 @@ your host's DNS name, grab the CA with
 not required. Verification off still encrypts everything; it only skips proof of
 the server's identity, which is a fair trade-off for test data.
 
+## Let's Encrypt for MQTT (required for Loxone)
+
+Some MQTT clients **always** verify the server certificate and cannot import a
+custom CA — the Loxone Miniserver is one (it drops the handshake with
+`tlsv1 alert unknown ca` in the broker log). For those, the `certbot` service
+replaces the self-signed cert on port `8883` with a real Let's Encrypt one,
+issued and renewed automatically via a Route 53 DNS-01 challenge. Nothing else
+in the stack changes; postgres keeps the self-signed cert.
+
+One-time setup:
+
+1. **DNS**: `PUBLIC_HOSTNAME` (e.g. `dok.marek-mraz.com`) must be an A record
+   in a Route 53 hosted zone of your AWS account, pointing at the Dokploy host.
+2. **IAM**: in the AWS console create an IAM user (e.g. `certbot-dok`) with an
+   access key and this policy (the zone ID below is the `marek-mraz.com`
+   hosted zone — swap it if you deploy against a different zone):
+
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [
+       { "Effect": "Allow",
+         "Action": ["route53:ListHostedZones", "route53:GetChange"],
+         "Resource": "*" },
+       { "Effect": "Allow",
+         "Action": ["route53:ChangeResourceRecordSets", "route53:ListResourceRecordSets"],
+         "Resource": "arn:aws:route53:::hostedzone/Z05021702HRYE5DV4ALT6" }
+     ]
+   }
+   ```
+
+3. **Environment** (Dokploy → this service → *Environment*, or `.env`):
+
+   ```bash
+   PUBLIC_HOSTNAME=dok.marek-mraz.com   # must match the DNS record
+   AWS_ACCESS_KEY_ID=...                # the IAM user's key
+   AWS_SECRET_ACCESS_KEY=...
+   LETSENCRYPT_EMAIL=you@example.com    # expiry warnings from Let's Encrypt
+   ```
+
+4. **Redeploy** and check the `certbot` container log for
+   `published Let's Encrypt certificate`. Verify what the broker serves:
+
+   ```bash
+   openssl s_client -connect dok.marek-mraz.com:8883 </dev/null 2>/dev/null \
+     | openssl x509 -noout -issuer -enddate
+   # issuer should be Let's Encrypt, not "civitas-test-data CA"
+   ```
+
+Renewal is automatic: `certs/renew-loop.sh` runs `certbot renew` twice a day
+and copies the new cert into the `certs` volume; the mosquitto entrypoint
+notices the change (checked hourly) and reloads the broker via SIGHUP — no
+downtime, connected clients stay connected.
+
+If `AWS_ACCESS_KEY_ID` is unset (or `PUBLIC_HOSTNAME` is `localhost`) the
+certbot service idles and the broker keeps the self-signed certificate — the
+stack works as before, minus Loxone.
+
 ## Wiring it up in CIVITAS/CORE
 
 Follow the *Connect external Data* guide with these values:
@@ -168,6 +226,7 @@ cumulative energy register, so charts on top of the data look plausible.
 docker-compose.yml            the whole stack (Dokploy-ready)
 .env.example                  credentials / ports / simulator settings
 certs/gen-certs.sh            auto-generates the TLS certificate (one-shot service)
+certs/renew-loop.sh           Let's Encrypt issue/renew loop for MQTT (certbot service)
 postgres/init/01_schema.sql   master data schema (SensorThings-style)
 postgres/init/02_seed.sql     5 meters, 5 sensors, 4 properties, 20 datastreams
 postgres/pg_hba.conf          client auth: remote = TLS + SCRAM only

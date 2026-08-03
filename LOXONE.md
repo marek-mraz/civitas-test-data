@@ -39,39 +39,108 @@ Everything else about the device (name, address, coordinates) lives in the
 platform, not in the message.
 
 > **Check what your Miniserver actually sends before wiring anything up.**
-> Loxone's native MQTT payload is *not* this shape by default — see step 3.
+> Loxone's native MQTT payload is *not* this shape by default — see step 4.
 
 ---
 
-## 1. Enable the MQTT Client in Loxone Config 16
+## 1. Connect to the Miniserver and back up its config
+
+All programming happens in **Loxone Config** (Windows only — on a Mac run it
+in a Windows VM). Download it from <https://www.loxone.com/downloads>; you
+need a Miniserver user with admin rights.
+
+**Version pairing matters.** Config must be the same or newer than the
+Miniserver firmware, and a newer *major* version will prompt to upgrade the
+Miniserver firmware on connect — decline that; never bundle a firmware
+upgrade into another change. The ZŠ SNP 20 Miniserver runs firmware
+**16.0.6.10**, so use the archived **Config 16.1.11.6** (downloads page →
+Archive), not the current 17.x.
+
+**Connect:**
+
+- **Same LAN** (normal case): the Loxone Config start screen lists every
+  Miniserver it finds on the network — double-click it and log in. If nothing
+  shows up, use **Miniserver → Connect** and enter its IP directly.
+- **Remote**: if Cloud DNS is enabled on the Miniserver, open
+  `http://dns.loxonecloud.com/<miniserver-serial>` in a browser to learn its
+  external address, then connect to that address from Loxone Config. If that
+  is not set up, connect from a machine on the school's network (VPN or
+  on-site).
+
+**Back up before changing anything:**
+
+1. **Miniserver → Load from Miniserver.** Always start from this, never from
+   an old local file — the copy on the Miniserver is the source of truth, and
+   saving a stale local project over it silently reverts someone else's work.
+2. **File → Save As…** to a dated file, e.g.
+   `ZS-SNP-20_2026-07-30_pre-mqtt.Loxone`, and copy it somewhere off that
+   machine. This file *is* the full config backup; restoring = opening it and
+   saving it back to the Miniserver.
+
+Loxone Config also keeps an automatic local archive of every save (under
+`Documents\Loxone`), but don't rely on it — it lives on whichever PC last
+edited the config.
+
+**Making changes:** everything you edit is local until you press **Save to
+Miniserver**. Saving reloads the Miniserver program — expect a few seconds of
+outage, so avoid saving while the building is in active use if relays/blinds
+are wired in.
+
+**Updating MQTT settings later** (broker password rotation, new broker
+address): Load from Miniserver → select the MQTT Client in the periphery
+tree → edit its properties → Save to Miniserver. The broker password is
+stored only in the Loxone project, so a platform-side `MQTT_PASSWORD` change
+always needs this round-trip.
+
+## 2. Enable the MQTT Client in Loxone Config 16
 
 The built-in MQTT Client needs a **Miniserver Gen 2** (or a Gen 1 plus the
 Loxone MQTT Gateway running on a separate host).
 
-1. Open Loxone Config 16 and connect to the Miniserver.
+1. Open Loxone Config 16 and connect to the Miniserver (section 1).
 2. In the periphery tree, right-click **Miniserver → Add Extension → MQTT
    Client** (listed under *Network* / *Communication* depending on your
    Config build).
-3. Select the MQTT Client and fill in its properties:
+3. Select the MQTT Client. It shows **DEVICE NOT FULLY CONFIGURED** until the
+   required fields are filled — that warning is normal. Set the properties:
 
    | Property | Value |
    | --- | --- |
+   | Name | `MQTT dok` (free text, only the label in the tree) |
    | Broker address | `dok.marek-mraz.com` |
-   | Port | `1883` (plain) or `8883` (TLS) |
-   | User | `civitas` |
-   | Password | your `MQTT_PASSWORD` |
-   | Client ID | `loxone-zs-snp-20` (must be unique on the broker) |
-   | Topic prefix | leave empty — full topics are set per output |
+   | Broker port | `8883` (change from the default 1883) |
+   | Protocol version | MQTT v5 (leave default) |
+   | Client ID | `loxone-zs-snp-20` |
+   | Username | `civitas` |
+   | Password | `MQTT_PASSWORD` from Dokploy → civitas-test-data → Environment |
+   | Use SSL/TLS | ✅ — required on port 8883 |
+   | Monitor service | ✅ — enables connection diagnostics |
+   | Display Diagnostic Inputs | ✅ — adds a "connected" status input to the tree |
 
    Give the client a **unique Client ID**. Two MQTT clients sharing an ID kick
    each other off the broker in an endless reconnect loop; this exact bug took
    the smart-meter dataset offline for a week.
 
-4. If you use port 8883, enable TLS and turn **off** certificate verification
-   ("allow self-signed") — the broker's certificate is auto-generated.
-5. Save to the Miniserver.
+   The broker serves a Let's Encrypt certificate (issued by the stack's
+   `certbot` service via Route 53 DNS-01), which the Miniserver trusts out of
+   the box — no client certificate, no CA import. If the broker still has its
+   self-signed bootstrap cert, Loxone rejects it with `tlsv1 alert unknown ca`
+   in the broker log; check that `PUBLIC_HOSTNAME` and the AWS credentials are
+   set in Dokploy → civitas-test-data → Environment and that the `certbot`
+   container logged a successful issuance.
 
-## 2. Publish the temperature value
+4. Save to the Miniserver and check the diagnostic input goes to "connected".
+
+   If it stays disconnected, try in order:
+
+   1. Protocol version → MQTT 3.1.1, save again.
+   2. Broker log shows `tlsv1 alert unknown ca` → the broker is still on its
+      self-signed bootstrap cert; fix the `certbot` service (see
+      [README → Let's Encrypt for MQTT](README.md#lets-encrypt-for-mqtt-required-for-loxone)),
+      don't fight Loxone's TLS validation. Plain 1883 is *not* a fallback from
+      the school: that port is firewalled to the platform's egress IP.
+
+## 3. Publish the temperature value
 
 1. Drag your temperature sensor (Tree/1-Wire/Modbus input, or the analog value
    you want to send) into the programming page.
@@ -88,7 +157,7 @@ Loxone MQTT Gateway running on a separate host).
    a stored observation.
 5. Save to the Miniserver.
 
-## 3. Verify what is actually on the wire
+## 4. Verify what is actually on the wire
 
 Before touching the platform, look at the real payload:
 
@@ -117,7 +186,7 @@ small Loxone-specific JSON object. This is the normal case. Pick one fix:
 Send the output of the `mosquitto_sub` command above when you get to this
 point and the structure/mapping can be adapted to it in a few minutes.
 
-## 4. Confirm it reached the platform
+## 5. Confirm it reached the platform
 
 Within about a minute of the first message:
 
@@ -136,7 +205,7 @@ In QGIS, add a WFS connection with URL `$BASE/ows` and add the
 `temperature_latest` layer. The geometry column is named `geom`, so the layer
 works over WFS 2.0.0 with default settings.
 
-## 5. Adding more sensors later
+## 6. Adding more sensors later
 
 1. Insert a row per sensor in `postgres/seed/03_temperature_seed.sql`
    (unique `id` and `serial_number`, its own coordinates) and redeploy — the
