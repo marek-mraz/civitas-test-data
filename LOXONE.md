@@ -131,6 +131,23 @@ Loxone MQTT Gateway running on a separate host).
 
 4. Save to the Miniserver and check the diagnostic input goes to "connected".
 
+   **Verified working 2026-08-03**: with the Let's Encrypt cert on the broker
+   the ZŠ SNP 20 Miniserver connects with TLSv1.3, MQTT v5. Field notes:
+
+   - Until the Config properties are saved to the Miniserver, it connects
+     with its stored settings and a default client ID `LxMs-<timestamp>` —
+     seeing that ID in the broker log means the box is fine but your local
+     Config edits (client ID, protocol version) were never saved.
+   - The school egresses over two WAN paths (`84.245.110.x` + `84.245.111.x`);
+     both race the broker and the loser logs a harmless
+     `unexpected eof while reading` next to the successful connect.
+   - After days of failed TLS attempts the retry back-off grows to tens of
+     minutes — a quiet 5-minute log window does not mean the client gave up.
+     Wait, or force a reconnect by saving the config / rebooting.
+   - Config version lock is real: Config 16.0.0 cannot save to firmware
+     16.0.6.10, so broker-side fixes beat client-side workarounds when no
+     matching Config is at hand.
+
    If it stays disconnected, try in order:
 
    1. Protocol version → MQTT 3.1.1, save again.
@@ -142,27 +159,69 @@ Loxone MQTT Gateway running on a separate host).
 
 ## 3. Publish the temperature value
 
-1. Drag your temperature sensor (Tree/1-Wire/Modbus input, or the analog value
-   you want to send) into the programming page.
-2. Add an **MQTT Publish** block (or connect the value to an input of the MQTT
-   Client block, depending on your Config build).
-3. Set the publish topic to:
+In this Config build the MQTT client shows two branches in the periphery
+tree: **Subscription (TI)** (incoming, ignore for this use case) and
+**Publish (TO)** (outgoing).
+
+1. Right-click **Publish (TO)** → **Add Publish**.
+2. In its properties set the topic:
 
    ```
    loxone/sensors/LOX-2026-000201
    ```
 
-4. Set the send interval to **15 s**, or publish on change with a minimum
-   interval. Do not publish faster than every few seconds; each message becomes
-   a stored observation.
+3. Payload — **verified 2026-08-03 on the ZŠ SNP 20 box**: the Publish
+   object is a plain *Text output* with **no payload/format field**; it
+   stringifies whatever is wired into its input, so a directly connected
+   temperature goes out as the bare value (`26.300`). To publish JSON,
+   format the text *before* the Publish with a **Status block**:
+
+   1. On the programming page, insert a **Status** block and connect the
+      room temperature to its input **I1**.
+   2. Double-click it, use a single row, leave every condition field
+      empty (an unconditioned row is always true) and set the Status-text
+      to exactly:
+
+      ```
+      {"temperature": <v1.1>}
+      ```
+
+      `<v1.1>` = value of I1 with one decimal (`<v1.2>` = two decimals).
+      Red text in the dialog means a syntax error; black is OK.
+   3. Connect the Status block's text output to the Publish input.
+
+   No timestamp or id is needed in the payload, the pipeline adds those.
+4. Publishing is **on value change**, not periodic — a stable room emits a
+   couple of messages per hour and that is normal (the 15 s heartbeat you
+   may remember from testing was the simulator). Set **Minimum Time
+   Interval** on the Publish object (e.g. 15 s) to rate-limit flicker; a
+   Mean value block is not needed. If a fixed cadence is ever required,
+   re-publish from a bridge (Node-RED heartbeat) rather than fighting the
+   trigger model in Config.
 5. Save to the Miniserver.
+
+### Scaling to many sensors
+
+- The Miniserver MQTT client supports **max 16 publishes (and 16
+  subscriptions) per broker connection** (Loxone KB). For more sensors add
+  a second **MQTT Client extension** to the same broker — each with its own
+  **unique Client ID** (see the warning in step 2; shared IDs cause the
+  mutual kick-off loop). Community reports confirm multiple connections
+  work; still, test publish #17 on the second client before wiring a whole
+  building.
+- One **Status block + Publish pair per sensor**, copy-pasted, changing
+  only the topic serial and the input wire. Bundling several sensors into
+  one payload is a dead end here: the Status block has only 4 inputs and
+  the platform pipeline expects one message per sensor topic anyway.
+- Platform side per added sensor: a row in
+  `postgres/seed/03_temperature_seed.sql` + its Thing/Datastream (section 6).
 
 ## 4. Verify what is actually on the wire
 
 Before touching the platform, look at the real payload:
 
 ```bash
-mosquitto_sub -h dok.marek-mraz.com -p 1883 -u civitas -P '<MQTT_PASSWORD>' \
+mosquitto_sub -h dok.marek-mraz.com -p 1883 -u civitas -P '493f9f90f90fd90fds90dfs' \
   -t 'loxone/sensors/#' -v
 ```
 
